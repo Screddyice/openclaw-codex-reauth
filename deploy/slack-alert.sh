@@ -35,7 +35,13 @@ RESP=$(curl -sS -X POST \
   --data-binary "$PAYLOAD" \
   https://slack.com/api/chat.postMessage)
 
-OK=$(printf '%s' "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('ok', False))")
+OK=$(printf '%s' "$RESP" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('ok', False))
+except Exception:
+    print('False')
+")
 if [[ "$OK" != "True" ]]; then
   echo "slack-alert: post failed: $RESP" >&2
   exit 3

@@ -14,6 +14,7 @@ set -euo pipefail
 
 GOST_VERSION="${GOST_VERSION:-3.0.0}"
 GOST_URL="https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_amd64.tar.gz"
+GOST_SHA256="${GOST_SHA256:-7b74e679872d1431da152d5df4b3192f660af54c0930bb8de296d10d5603863d}"
 GOST_BIN="/usr/local/bin/gost"
 
 REPO_DIR="${REPO_DIR:-$HOME/codex-reauth}"
@@ -34,8 +35,10 @@ chmod 600 "$ENV_FILE"
 if ! command -v gost >/dev/null 2>&1 || ! gost -V 2>&1 | grep -q "$GOST_VERSION"; then
   log "installing gost v$GOST_VERSION"
   TMP=$(mktemp -d)
-  trap "rm -rf $TMP" EXIT
-  curl -sSL "$GOST_URL" | tar -xz -C "$TMP"
+  trap 'rm -rf "${TMP:-}"' EXIT
+  curl -sSL "$GOST_URL" -o "$TMP/gost.tar.gz"
+  echo "$GOST_SHA256  $TMP/gost.tar.gz" | sha256sum -c -
+  tar -xz -C "$TMP" -f "$TMP/gost.tar.gz"
   sudo install -m 0755 "$TMP/gost" "$GOST_BIN"
   log "gost installed: $(gost -V 2>&1 | head -1)"
 else
@@ -59,13 +62,20 @@ systemctl --user enable residential-proxy.service
 systemctl --user restart residential-proxy.service
 
 # 7. Wait up to 10s for the forwarder to come up
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if nc -z 127.0.0.1 1080 2>/dev/null; then
+LISTENING=0
+for i in {1..10}; do
+  if (echo > /dev/tcp/127.0.0.1/1080) 2>/dev/null; then
+    LISTENING=1
     log "tunnel listening on 127.0.0.1:1080"
     break
   fi
   sleep 1
 done
+if [[ "$LISTENING" -ne 1 ]]; then
+  echo "ERROR: gost did not start listening on 127.0.0.1:1080 within 10s" >&2
+  systemctl --user status residential-proxy.service --no-pager | tail -20
+  exit 4
+fi
 
 # 8. Verify egress IP matches expected
 # shellcheck disable=SC1090

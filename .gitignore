@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+
+# Real configs (committed copies are .example)
+config.server.json
+config.mac.json
+
+# Secrets and env
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+residential-proxy.env
+
+# Runtime state
+*.log
+chrome-profile/
+.openclaw-oauth/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

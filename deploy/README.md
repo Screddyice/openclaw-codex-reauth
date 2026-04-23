@@ -21,6 +21,7 @@ git clone https://github.com/Screddyice/openclaw-codex-reauth.git ~/codex-reauth
 cd ~/codex-reauth && git pull
 
 # 2. Create the env file (NOT committed)
+mkdir -p ~/.openclaw && chmod 700 ~/.openclaw
 cat > ~/.openclaw/residential-proxy.env <<'EOF'
 IPROYAL_HOST=proxy.iproyal.com
 IPROYAL_PORT=12321
@@ -86,7 +87,7 @@ systemctl --user disable residential-proxy.service
 rm ~/.config/systemd/user/residential-proxy.service
 rm ~/.config/systemd/user/residential-proxy-alert.service
 systemctl --user daemon-reload
-crontab -l | grep -v "residential-proxy\|health-check.sh" | crontab -
+crontab -l | grep -vF "$HOME/codex-reauth/deploy/health-check.sh" | crontab -
 ```
 
 ## Fallback when this breaks

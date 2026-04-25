@@ -22,6 +22,7 @@ Install as a 15-minute cron job on each server:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -42,6 +43,10 @@ DEFAULT_GLOBS = [
     "~/.openclaw/agents/*/agent/auth-profiles.json",
 ]
 OAUTH_CACHE = "~/.openclaw/oauth-token-cache.json"
+ESCALATION_STATE_FILE = os.path.expanduser("~/.openclaw-oauth/watchdog-escalation-state.json")
+ESCALATION_ALERT_THRESHOLD = 2
+SLACK_ALERT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy", "slack-alert.sh")
+PROXY_ENV_FILE = os.path.expanduser("~/.openclaw/residential-proxy.env")
 SERVER_REAUTH_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "codex_reauth_server.py"
 )
@@ -105,6 +110,39 @@ def main() -> int:
     return 0
 
 
+def _load_escalation_state() -> dict:
+    try:
+        with open(ESCALATION_STATE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"consecutive_failures": 0}
+
+
+def _save_escalation_state(state: dict) -> None:
+    os.makedirs(os.path.dirname(ESCALATION_STATE_FILE), exist_ok=True)
+    with open(ESCALATION_STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+def _alert_slack(message: str) -> None:
+    """Post a Slack alert via the shared slack-alert.sh script. Non-fatal on
+    failure — we never want the watchdog to crash because Slack is down."""
+    if not os.path.exists(SLACK_ALERT_SCRIPT):
+        log.error("slack-alert.sh not found at %s; cannot send alert", SLACK_ALERT_SCRIPT)
+        return
+    cmd = [
+        "bash", "-c",
+        f'set -a; [ -f "{PROXY_ENV_FILE}" ] && source "{PROXY_ENV_FILE}"; set +a; '
+        f'bash "{SLACK_ALERT_SCRIPT}" codex-watchdog "$1"',
+        "_",
+        message,
+    ]
+    try:
+        subprocess.run(cmd, check=False, timeout=15)
+    except Exception as e:
+        log.error("failed to invoke slack-alert.sh: %s", e)
+
+
 def _escalate() -> int:
     if not os.path.exists(SERVER_REAUTH_SCRIPT):
         log.error("escalation target not found: %s", SERVER_REAUTH_SCRIPT)
@@ -115,6 +153,27 @@ def _escalate() -> int:
         capture_output=False,
     )
     log.info("codex_reauth_server.py exited %d", result.returncode)
+
+    state = _load_escalation_state()
+    if result.returncode == 0:
+        if state.get("consecutive_failures", 0) > 0:
+            log.info("escalation recovered after %d failure(s)", state["consecutive_failures"])
+        state["consecutive_failures"] = 0
+    else:
+        state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
+        log.warning(
+            "escalation failed (exit %d); consecutive failures: %d",
+            result.returncode, state["consecutive_failures"],
+        )
+        if state["consecutive_failures"] >= ESCALATION_ALERT_THRESHOLD:
+            _alert_slack(
+                f"codex reauth escalation has failed {state['consecutive_failures']} times in a row "
+                f"(last exit code: {result.returncode}). Likely causes: residential proxy down, "
+                f"IPRoyal IP rotated, or OpenAI rejecting even the residential IP. "
+                f"Manual intervention: verify `systemctl --user status residential-proxy.service` "
+                f"and/or fall back to Mac tunnel."
+            )
+    _save_escalation_state(state)
     return result.returncode
 
 

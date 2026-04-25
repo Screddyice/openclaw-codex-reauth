@@ -320,11 +320,20 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
     return 0 if all_ok else 15
 
 
+def _autodiscover_config() -> str | None:
+    """Return path to config.mac.json sitting alongside this script, if any."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(here, "config.mac.json")
+    return candidate if os.path.exists(candidate) else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="OpenAI Codex re-auth (Mac backup flow)")
     parser.add_argument("--config", default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.config is None:
+        args.config = _autodiscover_config()
     cfg = load_config(args.config)
     log = setup_logging(cfg)
     log.info("codex-reauth-mac starting")

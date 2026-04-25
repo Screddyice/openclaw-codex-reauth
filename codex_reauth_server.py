@@ -406,11 +406,25 @@ def _wait_for_turnstile(page, log: logging.Logger, max_wait: int = 60) -> None:
 
 
 # ---------------------------------------------------------------------- CLI
+def _autodiscover_config() -> str | None:
+    """Return path to config.server.json sitting alongside this script, if any."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(here, "config.server.json")
+    return candidate if os.path.exists(candidate) else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="OpenAI Codex re-auth (server, Gmail-driven)")
     parser.add_argument("--config", default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    # Zero-arg invocation (e.g., from codex_watchdog._escalate) must still pick up
+    # the operator's config.server.json. Auto-discover alongside the script.
+    # Without this, DEFAULT_CONFIG's placeholder email (`you@example.com`) would
+    # be used and the reauth would silently fail at email submission.
+    if args.config is None:
+        args.config = _autodiscover_config()
 
     cfg = load_config(args.config)
     log = setup_logging(cfg)

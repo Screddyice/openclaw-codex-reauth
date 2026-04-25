@@ -207,7 +207,11 @@ def launch_chrome(cfg: dict, log: logging.Logger) -> subprocess.Popen:
             chrome_args.append(f"--proxy-server=socks5://127.0.0.1:{socks_port}")
             log.info("SOCKS proxy detected on :%d — routing Chrome through residential IP", socks_port)
         except Exception:
-            log.info("no SOCKS proxy on :%d — using direct connection", socks_port)
+            log.warning(
+                "expected residential proxy on :%d not reachable — "
+                "re-auth will likely fail from datacenter IP. Check residential-proxy.service.",
+                socks_port,
+            )
 
     if cfg["codex"].get("use_xvfb") and not os.environ.get("DISPLAY"):
         chrome_args = [

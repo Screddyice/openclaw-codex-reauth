@@ -65,6 +65,7 @@ DEFAULT_CONFIG = {
     },
     "codex": {
         "openai_email": "you@example.com",
+        "openai_password": "",  # set in config.server.json (mode 600). Empty = SSO-only flow.
         "chrome_path": "/usr/bin/google-chrome-stable",
         "chrome_profile_dir": "~/.openclaw-oauth/chrome-profile",
         "cdp_port": 9333,
@@ -285,6 +286,20 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
             except Exception as e:
                 log.error("email/continue failed: %s", e)
                 return 12
+
+            # STEP 2b: if a password field appears, fill it. Accounts with a
+            # password set (vs Google-SSO-only) will prompt for password after
+            # email submit. SSO-only accounts will redirect to accounts.google.com
+            # instead — we skip silently in that case.
+            password = cfg["codex"].get("openai_password", "")
+            if password:
+                try:
+                    page.wait_for_selector('input[type="password"]', timeout=10000)
+                    page.locator('input[type="password"]').first.fill(password, timeout=5000)
+                    page.locator('button:has-text("Continue")').first.click(timeout=10000)
+                    log.info("password submitted")
+                except Exception as e:
+                    log.info("no password field after email submit (likely SSO path or already authenticated): %s", str(e)[:120])
 
             # STEP 3: wait for either (a) /auth/callback to fire on its own
             # (rare, happens if the persistent profile is fully logged in),

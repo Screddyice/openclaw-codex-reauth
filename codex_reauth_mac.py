@@ -28,7 +28,7 @@ The Mac config tells this script which servers to push to:
           "~/.openclaw/agents/*/agent/auth-profiles.json"
         ],
         "oauth_token_cache": "~/.openclaw/oauth-token-cache.json",
-        "restart_units": ["openclaw-gateway", "n8n-openclaw-bridge", "webhook-bridge"]
+        "restart_units": ["openclaw-gateway", "n8n-openclaw-bridge", "webhook-receiver"]
       },
       { "ssh_alias": "server-b", ... }
     ]
@@ -76,7 +76,7 @@ DEFAULT_CONFIG = {
                 "~/.openclaw/agents/*/agent/auth-profiles.json",
             ],
             "oauth_token_cache": "~/.openclaw/oauth-token-cache.json",
-            "restart_units": ["openclaw-gateway", "n8n-openclaw-bridge", "webhook-bridge"],
+            "restart_units": ["openclaw-gateway", "n8n-openclaw-bridge", "webhook-receiver"],
         },
         {
             "ssh_alias": "server-b",
@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
                 "~/.openclaw/agents/*/agent/auth-profiles.json",
             ],
             "oauth_token_cache": "~/.openclaw/oauth-token-cache.json",
-            "restart_units": ["openclaw-gateway", "webhook-bridge"],
+            "restart_units": ["openclaw-gateway", "webhook-receiver"],
         },
     ],
     "logging": {

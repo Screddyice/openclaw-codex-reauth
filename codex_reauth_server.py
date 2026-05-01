@@ -39,6 +39,8 @@ import argparse
 import json
 import logging
 import os
+import random
+import re as _re
 import subprocess
 import sys
 import threading
@@ -262,6 +264,16 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
+            # Apply playwright-stealth: spoof navigator.webdriver, fix plugins,
+            # normalize UA hints. Best-effort — OpenAI does behavioral
+            # fingerprinting too, so this is necessary but not sufficient.
+            try:
+                from playwright_stealth import Stealth
+                Stealth().apply_stealth_sync(page)
+                log.info("stealth applied to page")
+            except Exception as e:
+                log.warning("stealth not applied (%s); continuing without", e)
+
             # STEP 1: navigate to Codex authorize URL
             log.info("navigating to authorize url")
             try:
@@ -275,31 +287,95 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
 
             if "log-in" not in page.url and "authorize" not in page.url:
                 log.error("blocked before login form: %s", page.url[:120])
+                _dump_debug(page, log, "blocked-before-form")
                 return 12
 
-            # STEP 2: enter email and click Continue
+            # STEP 2: enter email + click Continue (human-paced).
+            # OpenAI does behavioral fingerprinting, so we hover, jitter, type
+            # with per-keystroke delay, mouse-move along a curve, then click.
             email = cfg["codex"]["openai_email"]
             log.info("submitting email %s", email)
             try:
-                page.locator('input[type="email"]').first.fill(email, timeout=15000)
-                page.locator('button:has-text("Continue")').first.click(timeout=10000)
+                email_loc = page.locator('input[type="email"]').first
+                email_loc.wait_for(state="visible", timeout=15000)
+                email_loc.hover()
+                page.wait_for_timeout(_jitter(150, 350))
+                email_loc.click()
+                page.wait_for_timeout(_jitter(120, 280))
+                email_loc.type(email, delay=_jitter(60, 140))
+                page.wait_for_timeout(_jitter(300, 600))
+
+                btn = page.locator('button:has-text("Continue")').first
+                btn.wait_for(state="visible", timeout=10000)
+                box = btn.bounding_box()
+                if box:
+                    page.mouse.move(
+                        box["x"] + box["width"] / 2,
+                        box["y"] + box["height"] / 2,
+                        steps=_jitter(8, 16),
+                    )
+                    page.wait_for_timeout(_jitter(80, 200))
+                btn.click(timeout=10000)
+
+                # Wait for the URL to actually change away from /log-in.
+                # OpenAI may go to /log-in/password (account has password),
+                # /log-in/code (passwordless), or /email-verification.
+                # 10s is generous — usually <1s.
+                try:
+                    page.wait_for_url(
+                        _re.compile(r"/log-in/(password|code|verify|otp)|/email-verification|/sign-in-with-chatgpt"),
+                        timeout=10000,
+                    )
+                except Exception:
+                    pass  # URL didn't change in 10s — log it and continue
+                log.info("post-submit url: %s", page.url[:140])
             except Exception as e:
                 log.error("email/continue failed: %s", e)
+                _dump_debug(page, log, "email-continue-failed")
                 return 12
 
-            # STEP 2b: if a password field appears, fill it. Accounts with a
-            # password set (vs Google-SSO-only) will prompt for password after
-            # email submit. SSO-only accounts will redirect to accounts.google.com
-            # instead — we skip silently in that case.
+            # STEP 2b: password handling. If `openai_password` is configured,
+            # fill it. Empty password = SSO-only or OTC-only flow.
             password = cfg["codex"].get("openai_password", "")
-            if password:
+            if password and "/log-in/password" in page.url:
                 try:
-                    page.wait_for_selector('input[type="password"]', timeout=10000)
-                    page.locator('input[type="password"]').first.fill(password, timeout=5000)
+                    page.wait_for_selector('input[type="password"]', timeout=5000)
+                    pw_loc = page.locator('input[type="password"]').first
+                    pw_loc.click()
+                    page.wait_for_timeout(_jitter(120, 280))
+                    pw_loc.type(password, delay=_jitter(60, 140))
+                    page.wait_for_timeout(_jitter(200, 400))
                     page.locator('button:has-text("Continue")').first.click(timeout=10000)
                     log.info("password submitted")
+                    page.wait_for_timeout(_jitter(800, 1500))
                 except Exception as e:
-                    log.info("no password field after email submit (likely SSO path or already authenticated): %s", str(e)[:120])
+                    log.info("password fill issue: %s", str(e)[:120])
+
+            # STEP 2c: if still on /log-in/password (no password configured or
+            # password fill failed), fall back to "Log in with one-time code".
+            # The OTC path uses the email magic-code flow that gmail_reader handles.
+            if "/log-in/password" in page.url:
+                log.info("password page detected, switching to one-time code")
+                try:
+                    otc_btn = page.locator(
+                        'button:has-text("one-time code"), a:has-text("one-time code")'
+                    ).first
+                    otc_btn.wait_for(state="visible", timeout=5000)
+                    box = otc_btn.bounding_box()
+                    if box:
+                        page.mouse.move(
+                            box["x"] + box["width"] / 2,
+                            box["y"] + box["height"] / 2,
+                            steps=_jitter(8, 16),
+                        )
+                        page.wait_for_timeout(_jitter(80, 200))
+                    otc_btn.click(timeout=5000)
+                    page.wait_for_timeout(_jitter(800, 1500))
+                    log.info("post-OTC-click url: %s", page.url[:140])
+                except Exception as e:
+                    log.error("could not click one-time-code button: %s", e)
+                    _dump_debug(page, log, "otc-button-not-found")
+                    return 12
 
             # STEP 3: wait for either (a) /auth/callback to fire on its own
             # (rare, happens if the persistent profile is fully logged in),
@@ -313,7 +389,12 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
                     log.info("callback already fired (trusted profile path)")
                     break
 
-                # Check Gmail
+                # Once we've submitted a code or followed a link, stop polling
+                # Gmail and just wait for the OAuth callback to fire.
+                if acted_on_email:
+                    time.sleep(2)
+                    continue
+
                 msg = gmail.wait_for_matching(
                     query=cfg["gmail"]["sender_query"],
                     since_ts_ms=start_ts_ms,
@@ -323,28 +404,62 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
                 if msg:
                     log.info("gmail hit: %s | %s", msg.from_addr[:40], msg.subject[:60])
                     body = msg.text_or_html()
-                    # Prefer magic link
-                    links = extract_links(body, cfg["gmail"]["link_host_allowlist"])
-                    if links:
-                        link = links[0]
-                        log.info("navigating to magic link: %s", link[:80])
+                    # Prefer numeric code over magic link — OTC emails contain
+                    # both a code AND asset URLs (fonts, tracking pixels) that
+                    # incorrectly match the host allowlist. The code is the
+                    # authoritative path.
+                    code = extract_first_code(body)
+                    if code:
+                        log.info("extracted verification code %s, filling", code)
                         try:
-                            page.goto(link, wait_until="domcontentloaded", timeout=30000)
+                            code_loc = page.locator(
+                                'input[inputmode="numeric"], input[autocomplete="one-time-code"], input[type="tel"]'
+                            ).first
+                            code_loc.wait_for(state="visible", timeout=5000)
+                            code_loc.click()
+                            page.wait_for_timeout(_jitter(120, 280))
+                            code_loc.type(code, delay=_jitter(60, 140))
+                            page.wait_for_timeout(_jitter(200, 400))
+                            page.keyboard.press("Enter")
                             acted_on_email = True
-                        except Exception as e:
-                            log.warning("magic link goto failed: %s", e)
-                    else:
-                        code = extract_first_code(body)
-                        if code:
-                            log.info("extracted verification code %s, filling", code)
+
+                            # STEP 3b: after successful code entry, OpenAI shows
+                            # a Codex OAuth consent page ("Sign in to Codex with
+                            # ChatGPT"). Click Continue → /auth/callback fires.
                             try:
-                                page.locator(
-                                    'input[inputmode="numeric"], input[autocomplete="one-time-code"], input[type="tel"]'
-                                ).first.fill(code, timeout=5000)
-                                page.keyboard.press("Enter")
+                                page.wait_for_url(
+                                    _re.compile(r"sign-in-with-chatgpt|/consent"),
+                                    timeout=15000,
+                                )
+                                log.info("consent page: %s", page.url[:140])
+                                consent_btn = page.locator(
+                                    'button:has-text("Continue")'
+                                ).first
+                                consent_btn.wait_for(state="visible", timeout=5000)
+                                box = consent_btn.bounding_box()
+                                if box:
+                                    page.mouse.move(
+                                        box["x"] + box["width"] / 2,
+                                        box["y"] + box["height"] / 2,
+                                        steps=_jitter(8, 16),
+                                    )
+                                    page.wait_for_timeout(_jitter(80, 200))
+                                consent_btn.click(timeout=5000)
+                                log.info("consent granted")
+                            except Exception as e:
+                                log.warning("consent step issue (callback may still fire): %s", e)
+                        except Exception as e:
+                            log.warning("code entry failed: %s", e)
+                    else:
+                        links = extract_links(body, cfg["gmail"]["link_host_allowlist"])
+                        if links:
+                            link = links[0]
+                            log.info("navigating to magic link: %s", link[:80])
+                            try:
+                                page.goto(link, wait_until="domcontentloaded", timeout=30000)
                                 acted_on_email = True
                             except Exception as e:
-                                log.warning("code entry failed: %s", e)
+                                log.warning("magic link goto failed: %s", e)
                 # Loop back — give the callback server a chance to fire
                 time.sleep(2)
 
@@ -354,6 +469,7 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
 
             if not _callback_state["hit"]:
                 log.error("no /auth/callback received within timeout (acted_on_email=%s)", acted_on_email)
+                _dump_debug(page, log, f"timeout-acted-{acted_on_email}")
                 return 13
 
             code = _callback_state["code"]
@@ -402,6 +518,41 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
                 chrome_proc.kill()
             except Exception:
                 pass
+
+
+def _jitter(low: int, high: int) -> int:
+    """Random int in [low, high] for human-like timing on clicks/keystrokes."""
+    return random.randint(low, high)
+
+
+def _dump_debug(page, log: logging.Logger, label: str) -> None:
+    """Save screenshot + page HTML + url/title to ~/.openclaw-oauth/debug/.
+
+    Forensic only — we want to know exactly what page Chrome was on when the
+    flow timed out. Cheap insurance: each dump is a few hundred KB.
+    """
+    try:
+        debug_dir = os.path.expanduser("~/.openclaw-oauth/debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        prefix = os.path.join(debug_dir, f"{ts}-{label}")
+        try:
+            page.screenshot(path=f"{prefix}.png", full_page=True)
+        except Exception as e:
+            log.warning("screenshot failed: %s", e)
+        try:
+            with open(f"{prefix}.html", "w") as f:
+                f.write(page.content())
+        except Exception as e:
+            log.warning("html dump failed: %s", e)
+        try:
+            with open(f"{prefix}.txt", "w") as f:
+                f.write(f"url: {page.url}\ntitle: {page.title()}\n")
+        except Exception as e:
+            log.warning("meta dump failed: %s", e)
+        log.info("debug artifacts saved to %s.{png,html,txt}", prefix)
+    except Exception as e:
+        log.warning("debug dump failed entirely: %s", e)
 
 
 def _wait_for_turnstile(page, log: logging.Logger, max_wait: int = 60) -> None:

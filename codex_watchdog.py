@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Codex token watchdog — the scheduled entry point.
 
-This is what cron runs. It does the cheap thing on every tick and only
-escalates to the expensive browser-driven re-auth when the cheap thing
-can't save the token.
+This is what cron runs. Reactive only: never refreshes proactively. Waits
+for the access token to actually expire, then performs the cheap refresh
+on the next tick. Worst-case downtime between expiry and detection is one
+cron interval (15min by default).
 
 Logic:
   1. Read the current openai-codex:codex-cli profile from auth-profiles.json.
-  2. If it has > REFRESH_BUFFER_HOURS of life left, do nothing. Exit 0.
+  2. If it still has positive life left (hours_left > REFRESH_BUFFER_HOURS,
+     where REFRESH_BUFFER_HOURS=0 means "wait for actual expiry"), do
+     nothing. Exit 0.
   3. Otherwise call OpenAI's token endpoint with the current refresh_token.
      a. Success → write the new tokens, done. Exit 0.
      b. invalid_grant / refresh_token_reused → the chain is broken.
@@ -37,7 +40,7 @@ from auth_profiles import (
 )
 from codex_oauth import CodexTokens, refresh_access_token
 
-REFRESH_BUFFER_HOURS = 4
+REFRESH_BUFFER_HOURS = 0  # reactive: refresh only after the token has actually expired
 DEFAULT_GLOBS = [
     "~/.openclaw/auth-profiles.json",
     "~/.openclaw/agents/*/agent/auth-profiles.json",
@@ -93,7 +96,7 @@ def main() -> int:
         log.error("profile has no refresh token — escalating")
         return _escalate()
 
-    log.info("token has %.1fh left, attempting API refresh", hours_left)
+    log.info("token expired (%.1fh past expiry), attempting reactive refresh", -hours_left)
     try:
         tokens: CodexTokens = refresh_access_token(refresh_tok)
     except Exception as e:

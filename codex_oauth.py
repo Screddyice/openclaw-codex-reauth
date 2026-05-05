@@ -37,6 +37,7 @@ class CodexTokens:
     refresh: str
     expires_ms: int  # epoch ms
     account_id: str | None
+    id_token: str | None = None
 
     def to_openclaw_profile(self) -> dict:
         """Serialize into the shape openclaw expects at profile slot
@@ -51,6 +52,19 @@ class CodexTokens:
             "scopes": SCOPE.split(),
             **({"accountId": self.account_id} if self.account_id else {}),
         }
+
+    def to_codex_cli_tokens(self) -> dict:
+        """Token block compatible with the `tokens` field of ~/.codex/auth.json
+        (Codex CLI 0.128.0+'s native ChatGPT-OAuth store)."""
+        block: dict = {
+            "access_token": self.access,
+            "refresh_token": self.refresh,
+        }
+        if self.id_token:
+            block["id_token"] = self.id_token
+        if self.account_id:
+            block["account_id"] = self.account_id
+        return block
 
 
 # ------------------------------------------------------------------ PKCE
@@ -141,7 +155,26 @@ def _parse_tokens(result: dict) -> CodexTokens:
         refresh=result["refresh_token"],
         expires_ms=int(time.time() * 1000) + expires_in * 1000 - 60_000,
         account_id=_account_id_from_jwt(access),
+        id_token=result.get("id_token"),
     )
+
+
+def expires_ms_from_jwt(access_token: str) -> int:
+    """Read the `exp` claim (seconds) from a JWT access_token, return epoch ms.
+
+    Used when reading tokens from `~/.codex/auth.json`, which has no explicit
+    `expires` field but does carry a JWT we can decode locally.
+    """
+    try:
+        payload_b64 = access_token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp")
+        if isinstance(exp, (int, float)):
+            return int(exp * 1000)
+    except Exception:
+        pass
+    return 0
 
 
 def _account_id_from_jwt(access_token: str) -> str | None:

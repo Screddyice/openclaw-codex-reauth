@@ -14,6 +14,17 @@ Each server runs two things on a schedule:
 
 A Mac-side companion script (`codex_reauth_mac.py`) runs the same flow from a real desktop browser and pushes fresh tokens to servers via SSH. Used as a manual tier-2 fallback when the headless server flow fails.
 
+### Dual-write to Codex CLI 0.128.0+
+
+Codex CLI 0.128.0 introduced a dedicated token store at `~/.codex/auth.json` (richer schema with `tokens.id_token`, `tokens.account_id`, `auth_mode`, `last_refresh`). Both the `codex` CLI itself and OpenClaw consume the same OAuth tokens but read them from different files.
+
+To keep both stores in lock-step, every refresh and every fresh login writes to **both**:
+
+- OpenClaw's `auth-profiles.json` (and `oauth-token-cache.json`)
+- Codex CLI's `~/.codex/auth.json` (merged — non-token fields like `auth_mode` are preserved; missing `id_token` on a refresh response keeps the existing one)
+
+The watchdog also reads from `~/.codex/auth.json` as a fallback if OpenClaw's profile is missing — useful for hosts where `codex login` was run directly (or tokens were pushed there from a Mac) before OpenClaw was configured.
+
 ## The datacenter-IP problem
 
 OpenAI's login page silently rejects new-device attempts from datacenter IPs (AWS, GCP, Azure, etc.) by suppressing email delivery. The headless server flow only works when the server's outbound traffic appears to come from a residential IP.

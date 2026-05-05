@@ -48,7 +48,12 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from auth_profiles import discover_paths, write_token_cache, write_tokens
+from auth_profiles import (
+    discover_paths,
+    write_codex_cli_native,
+    write_token_cache,
+    write_tokens,
+)
 from codex_oauth import build_authorize_url, exchange_code
 from gmail_reader import GmailReader, extract_first_code, extract_links
 
@@ -492,7 +497,11 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
             paths = discover_paths(cfg["auth_profiles"]["globs"])
             updated = write_tokens(paths, tokens)
             write_token_cache(cfg["auth_profiles"]["oauth_token_cache"], tokens)
-            log.info("wrote %d auth-profiles.json files + oauth-token-cache.json", updated)
+            cli_native_ok = write_codex_cli_native(tokens, create_if_missing=True)
+            log.info(
+                "wrote %d auth-profiles.json files + oauth-token-cache.json + codex-cli-native=%s",
+                updated, "yes" if cli_native_ok else "no",
+            )
 
             for unit in cfg["gateway"]["systemd_user_units"]:
                 r = subprocess.run(

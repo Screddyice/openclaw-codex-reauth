@@ -1035,7 +1035,7 @@ Identical to Task 8 but against the `openclaw` SSH alias. Same Slack token and c
 - [ ] **Step 1: Fetch branch on Cliqk**
 
 ```bash
-ssh openclaw '
+ssh cliqk-server '
   if [[ ! -d ~/codex-reauth/.git ]]; then
     if [[ -d ~/codex-reauth ]]; then
       mv ~/codex-reauth ~/codex-reauth.bak-$(date +%Y%m%d-%H%M%S)
@@ -1056,7 +1056,7 @@ ssh openclaw '
 - [ ] **Step 2: Create env file on Cliqk**
 
 ```bash
-ssh openclaw 'cat > ~/.openclaw/residential-proxy.env' <<'EOF'
+ssh cliqk-server 'cat > ~/.openclaw/residential-proxy.env' <<'EOF'
 IPROYAL_HOST=REPLACE_ME
 IPROYAL_PORT=REPLACE_ME
 IPROYAL_USER=REPLACE_ME
@@ -1065,12 +1065,12 @@ IPROYAL_EXPECTED_IP=REPLACE_ME
 SLACK_BOT_TOKEN=REPLACE_WITH_NEBULA_ASSIST_TOKEN  # fetch with: ssh neb-server 'jq -r .SLACK_BOT_TOKEN ~/.openclaw/openclaw.json' (or wherever the existing token is stored)
 SLACK_CHANNEL_ID=C09FLJDCAJD
 EOF
-ssh openclaw 'chmod 600 ~/.openclaw/residential-proxy.env'
+ssh cliqk-server 'chmod 600 ~/.openclaw/residential-proxy.env'
 ```
 
 - [ ] **Step 3: Install + verify + smoke-test alert on Cliqk**
 
-Repeat Task 9 steps 3–7 with `ssh openclaw ...` instead of `ssh neb-server ...`.
+Repeat Task 9 steps 3–7 with `ssh cliqk-server ...` instead of `ssh neb-server ...`.
 
 ---
 
@@ -1082,7 +1082,7 @@ Repeat Task 9 steps 3–7 with `ssh openclaw ...` instead of `ssh neb-server ...
 
 ```bash
 ssh neb-server 'bash ~/codex-reauth/deploy/health-check.sh'
-ssh openclaw    'bash ~/codex-reauth/deploy/health-check.sh'
+ssh cliqk-server    'bash ~/codex-reauth/deploy/health-check.sh'
 ```
 
 Both should log `health-check OK (<ip>)`.
@@ -1097,7 +1097,7 @@ gh pr merge feat/residential-proxy --squash
 
 ```bash
 ssh neb-server 'cd ~/codex-reauth && git checkout main && git pull'
-ssh openclaw    'cd ~/codex-reauth && git checkout main && git pull'
+ssh cliqk-server    'cd ~/codex-reauth && git checkout main && git pull'
 ```
 
 - [ ] **Step 4: Mark the plan complete in MEMORY**

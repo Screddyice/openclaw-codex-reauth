@@ -49,7 +49,10 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from auth_profiles import write_tokens as _write_local
+from auth_profiles import (
+    write_codex_cli_native as _write_local_codex_cli,
+    write_tokens as _write_local,
+)
 from codex_oauth import build_authorize_url, exchange_code
 from gmail_reader import GmailReader, extract_first_code, extract_links
 
@@ -199,14 +202,27 @@ def _ssh(alias: str, cmd: str, log: logging.Logger) -> tuple[int, str]:
     return result.returncode, result.stdout.strip()
 
 
-def push_to_server(server: dict, tokens_json: str, log: logging.Logger) -> bool:
+def push_to_server(
+    server: dict,
+    profile_json: str,
+    cli_tokens_json: str,
+    log: logging.Logger,
+) -> bool:
+    """Push fresh tokens to a remote server. Updates BOTH:
+      - openclaw's auth-profiles.json files (under remote_paths)
+      - oauth-token-cache.json (legacy cache)
+      - Codex CLI native ~/.codex/auth.json (so `codex` CLI itself works)
+
+    The Codex CLI write merges into the existing auth.json if present;
+    creates it (mode 0600) otherwise.
+    """
     alias = server["ssh_alias"]
     log.info("pushing tokens to %s", alias)
 
-    # Copy a tmp file with the new profile blob
+    # Copy a tmp file with the new openclaw profile + Codex CLI tokens block
     tmp_local = "/tmp/codex-tokens-push.json"
     with open(tmp_local, "w") as f:
-        f.write(tokens_json)
+        json.dump({"profile": json.loads(profile_json), "cli_tokens": json.loads(cli_tokens_json)}, f)
     r = subprocess.run(
         ["scp", tmp_local, f"{alias}:/tmp/codex-tokens-push.json"],
         capture_output=True, text=True, timeout=60,
@@ -215,12 +231,17 @@ def push_to_server(server: dict, tokens_json: str, log: logging.Logger) -> bool:
         log.error("scp to %s failed: %s", alias, r.stderr.strip()[:200])
         return False
 
-    # Remote merge script — write to every auth-profiles.json path
+    # Remote merge script — writes to every auth-profiles.json path AND to the
+    # Codex CLI native auth.json. Kept inline so the server doesn't need this
+    # repo deployed for the Mac fallback flow to work.
     remote_paths = server["remote_paths"]
     cache = server.get("oauth_token_cache", "~/.openclaw/oauth-token-cache.json")
+    cli_native = server.get("codex_cli_auth_path", "~/.codex/auth.json")
     merge_script = f'''
-import glob, json, os
-profile = json.load(open("/tmp/codex-tokens-push.json"))
+import glob, json, os, time
+payload = json.load(open("/tmp/codex-tokens-push.json"))
+profile = payload["profile"]
+cli_tokens = payload["cli_tokens"]
 paths = []
 for g in {json.dumps(remote_paths)}:
     paths.extend(glob.glob(os.path.expanduser(g)))
@@ -242,7 +263,19 @@ c["access"] = profile.get("access")
 c["refresh"] = profile.get("refresh")
 c["expires"] = profile.get("expires")
 with open(cache, "w") as f: json.dump(c, f)
-print(f"merged into {{updated}} files")
+cli_path = os.path.expanduser("{cli_native}")
+try:
+    with open(cli_path) as f: cd = json.load(f)
+except Exception:
+    cd = {{"OPENAI_API_KEY": None, "auth_mode": "chatgpt", "tokens": {{}}}}
+cd_tokens = cd.get("tokens") or {{}}
+cd_tokens.update(cli_tokens)
+cd["tokens"] = cd_tokens
+cd["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+os.makedirs(os.path.dirname(cli_path), exist_ok=True)
+with open(cli_path, "w") as f: json.dump(cd, f)
+os.chmod(cli_path, 0o600)
+print(f"merged into {{updated}} openclaw files + codex-cli-native")
 '''
     rc, out = _ssh(alias, f"python3 -c {shlex.quote(merge_script)} && rm -f /tmp/codex-tokens-push.json", log)
     if rc != 0:
@@ -310,11 +343,14 @@ def run(cfg: dict, dry_run: bool, log: logging.Logger) -> int:
     if local_paths:
         _write_local(local_paths, tokens)
         log.info("wrote local Mac auth-profiles.json (%d files)", len(local_paths))
+    if _write_local_codex_cli(tokens, create_if_missing=True):
+        log.info("wrote local Mac ~/.codex/auth.json")
 
     profile_json = json.dumps(tokens.to_openclaw_profile())
+    cli_tokens_json = json.dumps(tokens.to_codex_cli_tokens())
     all_ok = True
     for server_cfg in cfg["servers"]:
-        if not push_to_server(server_cfg, profile_json, log):
+        if not push_to_server(server_cfg, profile_json, cli_tokens_json, log):
             all_ok = False
 
     return 0 if all_ok else 15

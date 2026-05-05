@@ -34,7 +34,9 @@ import time
 
 from auth_profiles import (
     discover_paths,
+    read_codex_cli_native,
     read_current,
+    write_codex_cli_native,
     write_token_cache,
     write_tokens,
 )
@@ -79,16 +81,24 @@ def _is_invalid_grant(err: Exception) -> bool:
 def main() -> int:
     paths = discover_paths(DEFAULT_GLOBS)
     current = read_current(paths)
+    source = "openclaw"
     if not current:
-        log.error("no existing openai-codex profile found in any auth-profiles.json — escalating")
+        # Fall back to Codex CLI's native ~/.codex/auth.json — relevant on hosts
+        # where the Codex CLI was authenticated directly (e.g., via Mac → server
+        # token push) but openclaw's auth-profiles.json hasn't been seeded yet.
+        current = read_codex_cli_native()
+        source = "codex-cli"
+    if not current:
+        log.error("no existing openai-codex tokens found in openclaw or ~/.codex/auth.json — escalating")
         return _escalate()
 
     expires_ms = int(current.get("expires", 0))
     now_ms = int(time.time() * 1000)
     hours_left = (expires_ms - now_ms) / 3_600_000
+    log.info("read tokens from source=%s, %.1fh remaining", source, hours_left)
 
     if hours_left > REFRESH_BUFFER_HOURS:
-        log.info("token healthy, %.1fh remaining — no action", hours_left)
+        log.info("token healthy — no action")
         return 0
 
     refresh_tok = current.get("refresh")
@@ -106,10 +116,17 @@ def main() -> int:
         log.warning("refresh failed transiently: %s", e)
         return 2
 
-    write_tokens(paths, tokens)
+    # Dual-write: keep both stores in lock-step so Codex CLI itself and openclaw
+    # agents both see fresh tokens after a refresh. write_codex_cli_native is a
+    # no-op if ~/.codex/auth.json doesn't exist on this host.
+    openclaw_updated = write_tokens(paths, tokens)
     write_token_cache(OAUTH_CACHE, tokens)
+    codex_cli_updated = write_codex_cli_native(tokens)
     new_hours = (tokens.expires_ms - now_ms) / 3_600_000
-    log.info("API refresh OK, new token expires in %.1fh", new_hours)
+    log.info(
+        "API refresh OK, new token expires in %.1fh (openclaw=%d codex-cli=%s)",
+        new_hours, openclaw_updated, "yes" if codex_cli_updated else "no",
+    )
     return 0
 
 
@@ -170,11 +187,15 @@ def _escalate() -> int:
         )
         if state["consecutive_failures"] >= ESCALATION_ALERT_THRESHOLD:
             _alert_slack(
-                f"codex reauth escalation has failed {state['consecutive_failures']} times in a row "
-                f"(last exit code: {result.returncode}). Likely causes: residential proxy down, "
-                f"IPRoyal IP rotated, or OpenAI rejecting even the residential IP. "
-                f"Manual intervention: verify `systemctl --user status residential-proxy.service` "
-                f"and/or fall back to Mac tunnel."
+                "Codex login on this server keeps failing. The automatic "
+                f"refresh tried {state['consecutive_failures']} times in a row "
+                "and couldn't recover.\n\n"
+                "To fix: on your Mac, open Terminal and run:\n"
+                "  cd ~/projects/openclaw-codex-reauth\n"
+                "  python3 codex_reauth_mac.py\n\n"
+                "That opens a browser, you log in once, and fresh tokens "
+                "are pushed back to this server automatically. Until then, "
+                "any agent that uses Codex on this box will be stuck."
             )
     _save_escalation_state(state)
     return result.returncode
